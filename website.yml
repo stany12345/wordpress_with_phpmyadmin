@@ -1,0 +1,183 @@
+- name: Install and configure WordPress with phpMyAdmin on Nginx
+hosts: localhost
+become: yes
+vars:
+ip_path: public ip
+wordpress_path: /home/kali
+phpmyadmin_path: /home/kali/wordpress
+sftp_username: stany
+sftp_password: user@987
+sftp_group: stany
+db_user: admin
+db_name: wordpress
+db_password: user@987
+
+    tasks:
+
+    - name: Install required packages (Nginx, PHP, MySQL)
+    yum:
+    name: "{{ item }}"
+    state: present
+    loop:
+        - nginx
+        - php
+        - php-fpm
+        - mariadb-server
+        - mariadb
+        - php-mysqlnd
+        - php-gd
+        - php-xml
+        - php-json
+        - php-mbstring
+        notify:
+        - Restart Nginx
+        - Restart PHP-FPM
+        - Restart mariadb
+    - name: Configure PHP for WordPress
+    template:
+    src: /home/stany/project/templates/php.ini.j2
+    dest: /etc/php.ini
+    notify:
+        - Restart PHP-FPM
+    - name: Ensure MariaDB service is started and enabled
+    service:
+    name: mariadb
+    state: started
+    enabled: yes
+    - name: Set MySQL root password and remove anonymous users
+    shell: |
+    mysql --user=root --execute="
+    SET PASSWORD FOR 'root'@'localhost' = PASSWORD('{{ db_password }}');
+    DELETE FROM mysql.user WHERE User='';
+    DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
+    DROP DATABASE IF EXISTS test;
+    FLUSH PRIVILEGES;
+    "
+    - name: Create MySQL database for WordPress
+    mysql_db:
+    name: "{{ db_user }}"
+    state: present
+    login_user: root
+    login_password: "{{ db_password }}"
+    - name: Create MySQL user for WordPress
+    mysql_user:
+    name: "{{ db_user }}"
+    password: "{{ db_password }}"
+    priv: "{{ db_name }}.*:ALL"
+    host: "localhost"
+    state: present
+    login_user: root
+    login_password: "{{ db_password }}"
+    - name: Download and extract WordPress
+    unarchive:
+    src: https://wordpress.org/latest.tar.gz
+    dest: "{{ wordpress_path }}"
+    remote_src: yes
+    owner: nginx
+    group: nginx
+    - name: Set permissions for WordPress directory
+    file:
+    path: "{{ wordpress_path }}"
+    owner: nginx
+    group: nginx
+    mode: "0755"
+    recurse: yes
+    - name: Configure Nginx for WordPress
+    template:
+    src: /home/stany/project/templates/wordpress.nginx.conf.j2
+    dest: /etc/nginx/conf.d/wordpress.conf
+    notify:
+        - Restart Nginx
+    - name: Copy WordPress config sample
+    ansible.builtin.copy:
+    src: "{{ phpmyadmin_path }}/wp-config-sample.php"
+    dest: "{{ phpmyadmin_path }}/wp-config.php"
+    owner: nginx
+    group: nginx
+    mode: '0644'
+    - name: Update WordPress config with database details
+    ansible.builtin.replace:
+    path: "{{ phpmyadmin_path }}/wp-config.php"
+    regexp: "(define\\('DB_NAME', *'[^']*'\\);)"
+    replace: "define('DB_NAME', '{{ db_name }}');"
+    backup: yes
+    - name: Update WordPress config with database user
+    ansible.builtin.replace:
+    path: "{{ phpmyadmin_path }}/wp-config.php"
+    regexp: "(define\\('DB_USER', *'[^']*'\\);)"
+    replace: "define('DB_USER', '{{ db_user }}');"
+    backup: yes
+    - name: Update WordPress config with database password
+    ansible.builtin.replace:
+    path: "{{ phpmyadmin_path }}/wp-config.php"
+    regexp: "(define\\('DB_PASSWORD', *'[^']*'\\);)"
+    replace: "define('DB_PASSWORD', '{{ db_password }}');"
+    backup: yes
+    - name: Download phpMyAdmin latest version
+    get_url:
+    url: https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-language s.tar.gz
+    dest: "{{ phpmyadmin_path }}/phpMyAdmin-5.2.1-all-languages.tar.gz"
+    - name: Extract phpMyAdmin tarball
+    unarchive:
+    src: "{{ phpmyadmin_path }}/phpMyAdmin-5.2.1-all-languages.tar.gz"
+    dest: "{{ phpmyadmin_path }}"
+    remote_src: yes
+    creates: "{{ phpmyadmin_path }}/config.inc.php" # Ensure this file exis ts after extraction
+    - name: Ensure the destination directory exists
+    file:
+    path: /home/stany/wordpress/phpmyadmin
+    state: directory
+    - name: Copy sample configuration file for phpMyAdmin
+    ansible.builtin.copy:
+    src: /home/stany/wordpress/phpMyAdmin-5.2.1-all-languages/config.sample. inc.php
+    dest: /home/stany/wordpress/phpmyadmin/config.inc.php
+    remote_src: yes
+    - name: Move phpMyAdmin files to the target directory
+    command: cp -r /home/stany/wordpress/phpMyAdmin-5.2.1-all-languages/* /ho me/stany/wordpress/phpmyadmin
+    ignore_errors: yes
+    - name: Set permissions recursively for WordPress directory
+    file:
+    path: "{{ wordpress_path }}"
+    recurse: yes
+    owner: nginx
+    group: nginx
+    mode: "0755"
+    - name: Set blowfish secret in config.inc.php
+    lineinfile:
+    path: "{{ phpmyadmin_path }}/phpmyadmin/config.inc.php"
+    regexp: "^\\$cfg\\['blowfish_secret'\\] = '';"
+    line: "$cfg['blowfish_secret'] = 'your_secret';"
+    insertafter: "^\\$cfg\\['blowfish_secret'\\] = 'vj';"
+    backrefs: yes
+    - name: Create SFTP user for Stany
+    user:
+    name: "{{ sftp_username }}"
+    password: "{{ sftp_password | password_hash('sha512') }}"
+    groups: "{{ sftp_group }}"
+    createhome: yes
+    - name: Change ownership and permissions for phpMyAdmin directory
+    file:
+    path: "{{ phpmyadmin_path }}"
+    state: directory
+    recurse: yes
+    owner: nginx
+    group: nginx
+    mode: '0755'
+    - name: Set SELinux to permissive mode (temporarily disable)
+    command: setenforce 0
+    when: ansible_selinux.status == "enabled"
+    - name: Set SELinux context for WordPress directory
+    command: >
+    chcon -R -t httpd_sys_content_t {{ phpmyadmin_path }}
+    when: ansible_selinux.status == "enabled"
+
+    handlers:
+
+    - name: Restart Nginx
+    systemd:
+    name: nginx
+    state: restarted
+    - name: Restart PHP-FPM
+    systemd:
+    name: php-fpm
+    state: restarted
